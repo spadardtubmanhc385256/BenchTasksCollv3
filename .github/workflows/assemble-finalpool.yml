@@ -1,0 +1,67 @@
+name: Assemble finalpool
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  assemble:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out finalpool
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Copy implemented tasks into tasks/finalpool
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          python3 - <<'PY'
+          import io
+          import json
+          import pathlib
+          import shutil
+          import subprocess
+          import tarfile
+          import tempfile
+
+          root = pathlib.Path.cwd()
+          manifest = json.loads((root / 'finalpool_manifest.json').read_text())
+          dest = root / 'tasks' / 'finalpool'
+          if dest.exists():
+              shutil.rmtree(dest)
+          dest.mkdir(parents=True, exist_ok=True)
+          seen = set()
+          for item in manifest:
+              task = item['task']
+              commit = item['commit']
+              source = item['source']
+              if task in seen:
+                  raise SystemExit(f'duplicate task in manifest: {task}')
+              seen.add(task)
+              tar_bytes = subprocess.check_output(['git', 'archive', '--format=tar', commit, source])
+              with tempfile.TemporaryDirectory() as td:
+                  with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as tf:
+                      tf.extractall(td)
+                  src = pathlib.Path(td) / source
+                  if not src.is_dir():
+                      raise SystemExit(f'missing task directory {source} at {commit}')
+                  shutil.copytree(src, dest / task)
+          (root / 'finalpool_manifest.json').unlink(missing_ok=True)
+          (root / '.github' / 'workflows' / 'assemble-finalpool.yml').unlink(missing_ok=True)
+          print(f'assembled {len(seen)} tasks')
+          PY
+          git add -A tasks/finalpool finalpool_manifest.json .github/workflows/assemble-finalpool.yml
+          if git diff --cached --quiet; then
+            echo 'No changes to commit'
+          else
+            git commit -m 'Add implemented tasks to tasks/finalpool'
+            git push origin HEAD:finalpool
+          fi
